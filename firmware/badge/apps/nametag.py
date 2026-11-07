@@ -28,7 +28,9 @@ class NametagApp(BaseApp):
         if self.launched:
             leds.fill((0,1,1))
             display.draw_png("/data/graphics/hello_i_am_blank.png")
-
+            display.update()
+            return
+        
             scr = lvgl.obj()
             scr.remove_style_all()
             scr.set_size(lvgl.pct(100), lvgl.pct(100))
