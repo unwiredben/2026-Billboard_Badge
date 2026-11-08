@@ -183,6 +183,7 @@ class EPaperDisplay:
         self._requested_mixed = False
         self._requested_red_only = False
         self._requested_changed_only = False
+        self._requested_led_feedback = True
         self._render_grayscale = False
         self._render_mixed = False
         # E-paper keeps its image across reboot; its initial pigments are unknown.
@@ -305,13 +306,14 @@ class EPaperDisplay:
             self._render_mixed = previous_mixed
 
     def update(self, grayscale=False, mixed=False, red_only=False,
-               changed_only=False):
+               changed_only=False, led_feedback=True):
         """Queue the latest frame; gray waveforms are opt-in and require B1.
 
         grayscale=True uses 00 white, 01 black, 10 gray (no red).
         mixed=True uses 00 white, 01 black, 10 red, 11 gray in software.
         red_only=True refreshes red pixels and holds pixels that remain non-red.
         changed_only=True additionally holds unchanged red pixels.
+        led_feedback=False suppresses refresh status on the LED bar.
         Its first call after boot or a gray refresh falls back to a full update.
         Match the mode used by refresh_lvgl()/draw_png().
         """
@@ -320,6 +322,7 @@ class EPaperDisplay:
         self._requested_mixed = mixed
         self._requested_red_only = red_only
         self._requested_changed_only = changed_only
+        self._requested_led_feedback = led_feedback
         self._display_updated.clear()
         self._framebuffer_ready.set()
 
@@ -378,6 +381,7 @@ class EPaperDisplay:
                 mixed = self._requested_mixed
                 red_only = self._requested_red_only
                 changed_only = self._requested_changed_only
+                led_feedback = self._requested_led_feedback
                 self._display_updated.clear()
                 t0 = time.ticks_ms()
                 if self._reverse_fb_bits and not (grayscale or mixed):
@@ -414,9 +418,11 @@ class EPaperDisplay:
                     self._displayed_red[:] = self._framebuffer_red
                 print("Viper split & reverse ms:", time.ticks_diff(time.ticks_ms(), t0))
 
-                leds.clear()
+                if led_feedback:
+                    leds.clear()
                 self._refreshing_hw = True
-                _blink_task = aio.create_task(self._blink_red_while_refreshing())
+                if led_feedback:
+                    _blink_task = aio.create_task(self._blink_red_while_refreshing())
 
                 old_rev = self._reverse_fb_bits
                 # Gray helpers consume logical-order planes and reverse on send.
@@ -454,10 +460,11 @@ class EPaperDisplay:
                     self._refreshing_hw = False
                     await aio.sleep_ms(50)
 
-                leds[0] = (0, 40, 0)
-                leds.write()
-                await aio.sleep_ms(400)
-                leds.clear()
+                if led_feedback:
+                    leds[0] = (0, 40, 0)
+                    leds.write()
+                    await aio.sleep_ms(400)
+                    leds.clear()
 
                 gc.collect()
                 if not self._framebuffer_ready.is_set():

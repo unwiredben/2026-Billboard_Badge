@@ -22,7 +22,7 @@ class KittApp(BaseApp):
         print(f"Showing KITT")
         display.clear()
         display.draw_png(f'/data/graphics/kitt_b_w_r.png')
-        display.update()
+        display.update(led_feedback=False)
 
     def update_scanner(self):
         # scanner is red LEDS that scan left to right, then right to left
@@ -63,7 +63,7 @@ class KittApp(BaseApp):
                 delay_ms = 3000 if self.red_refresh_count == 0 else 2000
                 if time.ticks_diff(
                         time.ticks_ms(), self.display_idle_since) >= delay_ms:
-                    display.update(red_only=True)
+                    display.update(red_only=True, led_feedback=False)
                     self.red_refresh_count += 1
                     self.display_idle_since = None
             self.update_scanner()
