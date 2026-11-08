@@ -10,7 +10,9 @@ from lib.epd import display, display_height, display_width
 PADDING = 10
 CELL_SIZE = 48
 WALL_SIZE = 3
-RED_INSET = WALL_SIZE * 2
+RED_EDGE_GAP = 5
+RED_OFFSET = WALL_SIZE + RED_EDGE_GAP
+RED_SIZE = CELL_SIZE - WALL_SIZE - 2 * RED_EDGE_GAP
 FINAL_RED_REFRESHES = 2
 RED_TRAIL_LENGTH = 4
 RESTART_DELAY_MS = 5000
@@ -201,11 +203,10 @@ class MazeApp(BaseApp):
 
     def _set_cell_red(self, cell, enabled):
         col, row = self._position(cell)
-        x = MAZE_X + col * CELL_SIZE + RED_INSET
-        y = MAZE_Y + row * CELL_SIZE + RED_INSET
-        size = CELL_SIZE - 2 * RED_INSET
-        display.red.fill_rect(x, y, size, size, 1 if enabled else 0)
-        display.black.fill_rect(x, y, size, size, 0)
+        x = MAZE_X + col * CELL_SIZE + RED_OFFSET
+        y = MAZE_Y + row * CELL_SIZE + RED_OFFSET
+        display.red.fill_rect(x, y, RED_SIZE, RED_SIZE, 1 if enabled else 0)
+        display.black.fill_rect(x, y, RED_SIZE, RED_SIZE, 0)
 
     def _advance_red_trail(self, cell):
         if len(self._red_cells) >= RED_TRAIL_LENGTH:
