@@ -124,3 +124,11 @@ display.update(red_only=True, changed_only=True)
 ```
 
 `changed_only=True` without `red_only=True` raises `ValueError`.
+
+Use `preserve_red=True` to hold pixels that are removed from the software red
+plane instead of driving them back to white or black. This is useful for a
+moving drive window that should leave previously developed red ink on screen:
+
+```python
+display.update(red_only=True, preserve_red=True)
+```

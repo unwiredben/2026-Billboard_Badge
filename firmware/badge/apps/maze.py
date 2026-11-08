@@ -236,7 +236,8 @@ class MazeApp(BaseApp):
         if self._final_refreshes:
             # Repaint every red cell so even the last solver cells receive
             # enough red pulls to reach full saturation rather than gray.
-            display.update(red_only=True, led_feedback=False)
+            display.update(
+                red_only=True, preserve_red=True, led_feedback=False)
             self._final_refreshes -= 1
             if not self._final_refreshes:
                 self._solved = True
@@ -249,7 +250,7 @@ class MazeApp(BaseApp):
             return
         self._advance_red_trail(cell)
         # Repaint only the four-cell trail. Each cell receives enough repeated
-        # pulls to develop red, then the removal selector restores it to white.
-        display.update(red_only=True, led_feedback=False)
+        # pulls to develop red, then falls out of the drive window but stays red.
+        display.update(red_only=True, preserve_red=True, led_feedback=False)
         if cell == self._exit:
             self._final_refreshes = FINAL_RED_REFRESHES

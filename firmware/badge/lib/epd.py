@@ -137,6 +137,12 @@ def _fast_split_no_reverse(src_fb: ptr8, dst_left: ptr8, dst_right: ptr8):
             dst_right[dst_row + c] = src_fb[src_row + 60 + c]
 
 
+@micropython.viper
+def _fast_or_into(src: ptr8, dst: ptr8, count: int):
+    for i in range(count):
+        dst[i] = dst[i] | src[i]
+
+
 class EPaperDisplay:
     width = display_width
     height = display_height
@@ -183,6 +189,7 @@ class EPaperDisplay:
         self._requested_mixed = False
         self._requested_red_only = False
         self._requested_changed_only = False
+        self._requested_preserve_red = False
         self._requested_led_feedback = True
         self._render_grayscale = False
         self._render_mixed = False
@@ -278,11 +285,12 @@ class EPaperDisplay:
     def supports_grayscale(self):
         return self._supports_grayscale
 
-    def _check_modes(self, grayscale, mixed, red_only=False, changed_only=False):
+    def _check_modes(self, grayscale, mixed, red_only=False,
+                     changed_only=False, preserve_red=False):
         if int(bool(grayscale)) + int(bool(mixed)) + int(bool(red_only)) > 1:
             raise ValueError("Choose grayscale, mixed, or red-only mode")
-        if changed_only and not red_only:
-            raise ValueError("changed_only requires red_only=True")
+        if (changed_only or preserve_red) and not red_only:
+            raise ValueError("changed_only and preserve_red require red_only=True")
         if (grayscale or mixed) and not self.supports_grayscale:
             raise ValueError("Grayscale refresh requires a B1 panel")
         if red_only and not self.supports_grayscale:
@@ -306,22 +314,25 @@ class EPaperDisplay:
             self._render_mixed = previous_mixed
 
     def update(self, grayscale=False, mixed=False, red_only=False,
-               changed_only=False, led_feedback=True):
+               changed_only=False, preserve_red=False, led_feedback=True):
         """Queue the latest frame; gray waveforms are opt-in and require B1.
 
         grayscale=True uses 00 white, 01 black, 10 gray (no red).
         mixed=True uses 00 white, 01 black, 10 red, 11 gray in software.
         red_only=True refreshes red pixels and holds pixels that remain non-red.
         changed_only=True additionally holds unchanged red pixels.
+        preserve_red=True holds red pixels removed from the software framebuffer.
         led_feedback=False suppresses refresh status on the LED bar.
         Its first call after boot or a gray refresh falls back to a full update.
         Match the mode used by refresh_lvgl()/draw_png().
         """
-        self._check_modes(grayscale, mixed, red_only, changed_only)
+        self._check_modes(
+            grayscale, mixed, red_only, changed_only, preserve_red)
         self._requested_grayscale = grayscale
         self._requested_mixed = mixed
         self._requested_red_only = red_only
         self._requested_changed_only = changed_only
+        self._requested_preserve_red = preserve_red
         self._requested_led_feedback = led_feedback
         self._display_updated.clear()
         self._framebuffer_ready.set()
@@ -381,6 +392,7 @@ class EPaperDisplay:
                 mixed = self._requested_mixed
                 red_only = self._requested_red_only
                 changed_only = self._requested_changed_only
+                preserve_red = self._requested_preserve_red
                 led_feedback = self._requested_led_feedback
                 self._display_updated.clear()
                 t0 = time.ticks_ms()
@@ -415,7 +427,12 @@ class EPaperDisplay:
                 # Save the exact target represented by the worker snapshots.
                 # If hardware fails below it is invalidated rather than trusted.
                 if self._displayed_red is not None and not (grayscale or mixed):
-                    self._displayed_red[:] = self._framebuffer_red
+                    if use_red_delta and preserve_red:
+                        _fast_or_into(
+                            self._framebuffer_red, self._displayed_red,
+                            len(self._displayed_red))
+                    else:
+                        self._displayed_red[:] = self._framebuffer_red
                 print("Viper split & reverse ms:", time.ticks_diff(time.ticks_ms(), t0))
 
                 if led_feedback:
@@ -436,7 +453,8 @@ class EPaperDisplay:
                         from lib.epd_grayscale import red_only_update
                         await red_only_update(
                             self, black_left, red_left, black_right, red_right,
-                            old_red_left, old_red_right, changed_only)
+                            old_red_left, old_red_right, changed_only,
+                            preserve_red)
                     else:
                         if red_only:
                             print("EPD: red-only baseline unknown; using full refresh")

@@ -143,14 +143,21 @@ def _planes_overlap(black, red, count: int) -> int:
 
 @micropython.viper
 def _red_delta_selectors(black, red, old_red, count: int,
-                         changed_only: int):
+                         changed_only: int, preserve_red: int):
     """Replace target planes with 11 hold or a red pixel's target color."""
     b = ptr8(black)
     r = ptr8(red)
     old = ptr8(old_red)
     for i in range(count):
         new_red = r[i]
-        if changed_only:
+        if preserve_red:
+            if changed_only:
+                drive_red = (255 ^ old[i]) & new_red
+            else:
+                drive_red = new_red
+            b[i] = 255 ^ drive_red
+            r[i] = 255
+        elif changed_only:
             changed = old[i] ^ new_red
             hold = 255 ^ changed
             b[i] = hold | (changed & (255 ^ new_red) & b[i])
@@ -362,14 +369,17 @@ async def mixed_update(display, black_left, red_left, black_right, red_right):
 
 
 async def red_only_update(display, black_left, red_left, black_right, red_right,
-                          old_red_left, old_red_right, changed_only=False):
+                          old_red_left, old_red_right, changed_only=False,
+                          preserve_red=False):
     """Refresh red, apply red additions/removals, and hold non-red pixels."""
     _validate_halves(black_left, red_left, black_right, red_right)
     _validate_halves(old_red_left, old_red_left, old_red_right, old_red_right)
     _red_delta_selectors(
-        black_left, red_left, old_red_left, HALF_BYTES, int(changed_only))
+        black_left, red_left, old_red_left, HALF_BYTES,
+        int(changed_only), int(preserve_red))
     _red_delta_selectors(
-        black_right, red_right, old_red_right, HALF_BYTES, int(changed_only))
+        black_right, red_right, old_red_right, HALF_BYTES,
+        int(changed_only), int(preserve_red))
 
     # Both planes being all ones means every pixel was optimized into hold.
     if (_all_hold(black_left, red_left, HALF_BYTES)
