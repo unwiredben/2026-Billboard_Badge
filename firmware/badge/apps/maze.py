@@ -11,6 +11,7 @@ CELL_SIZE = 48
 WALL_SIZE = 3
 RED_INSET = WALL_SIZE * 2
 FINAL_RED_REFRESHES = 2
+RED_TRAIL_LENGTH = 4
 
 COLS = (display_width - 2 * PADDING) // CELL_SIZE
 ROWS = (display_height - 2 * PADDING) // CELL_SIZE
@@ -40,6 +41,7 @@ class MazeApp(BaseApp):
         self._exit = 0
         self._solution = []
         self._solution_index = 0
+        self._red_cells = []
         self._waiting_for_initial = False
         self._final_refreshes = 0
         self._solved = False
@@ -194,19 +196,27 @@ class MazeApp(BaseApp):
         self._solution_index += 1
         return cell
 
-    def _fill_cell_red(self, cell):
+    def _set_cell_red(self, cell, enabled):
         col, row = self._position(cell)
         x = MAZE_X + col * CELL_SIZE + RED_INSET
         y = MAZE_Y + row * CELL_SIZE + RED_INSET
         size = CELL_SIZE - 2 * RED_INSET
-        display.red.fill_rect(x, y, size, size, 1)
+        display.red.fill_rect(x, y, size, size, 1 if enabled else 0)
         display.black.fill_rect(x, y, size, size, 0)
+
+    def _advance_red_trail(self, cell):
+        if len(self._red_cells) >= RED_TRAIL_LENGTH:
+            previous = self._red_cells.pop(0)
+            self._set_cell_red(previous, False)
+        self._set_cell_red(cell, True)
+        self._red_cells.append(cell)
 
     def _start(self):
         print("Generating maze")
         self._generate()
         self._draw_maze()
         self._prepare_solver()
+        self._red_cells = []
         self._waiting_for_initial = True
         self._final_refreshes = 0
         self._solved = False
@@ -237,9 +247,9 @@ class MazeApp(BaseApp):
         if cell is None:
             self._solved = True
             return
-        self._fill_cell_red(cell)
-        # Repaint existing red cells as well as adding this one. A single short
-        # waveform pass looks gray on the B1 panel; repeated pulls develop red.
+        self._advance_red_trail(cell)
+        # Repaint only the four-cell trail. Each cell receives enough repeated
+        # pulls to develop red, then the removal selector restores it to white.
         display.update(red_only=True, led_feedback=False)
         if cell == self._exit:
             self._final_refreshes = FINAL_RED_REFRESHES
