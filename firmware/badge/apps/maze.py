@@ -3,8 +3,11 @@
 import random
 import time
 
+import lvgl
+
 from apps.base_app import BaseApp
 from lib.epd import display, display_height, display_width
+from lib import smooth_text
 
 
 PADDING = 10
@@ -16,6 +19,18 @@ RED_SIZE = CELL_SIZE - WALL_SIZE - 2 * RED_EDGE_GAP
 FINAL_RED_REFRESHES = 2
 RED_TRAIL_LENGTH = 4
 RESTART_DELAY_MS = 5000
+HALLWAY_WORDS = (
+    "dragons", "wumpus", "orcs", "0-days", "hackers", "KGB", "CIA",
+    "snipes", "grue", "sarlacc", "molemen", "chupacabra", "greys",
+    "dingbats", "lawyers",
+)
+MIN_HALLWAY_WORDS = 5
+WORD_FONT_FILE = "marker-18.bin"
+WORD_FONT_FALLBACK = lvgl.font_montserrat_16
+WORD_PADDING = 4
+
+_WHITE = lvgl.color_hex(0xFFFFFF)
+_BLACK = lvgl.color_hex(0x000000)
 
 COLS = (display_width - 2 * PADDING) // CELL_SIZE
 ROWS = (display_height - 2 * PADDING) // CELL_SIZE
@@ -35,12 +50,23 @@ _DX = (0, 1, 0, -1)
 _DY = (-1, 0, 1, 0)
 
 
+def _shuffle(items):
+    """Shuffle a list with APIs available in MicroPython's random module."""
+    for index in range(len(items) - 1, 0, -1):
+        swap_index = random.randint(0, index)
+        items[index], items[swap_index] = items[swap_index], items[index]
+
+
 class MazeApp(BaseApp):
     def __init__(self, name: str | None = None) -> None:
         self.name = "Maze Solver"
         self.sleep_ms = 50
         self.launched = False
+        self._start_pending = False
         self._passages = []
+        self._word_hallways = []
+        self._word_font = None
+        self._word_screen = None
         self._entry = 0
         self._exit = 0
         self._solution = []
@@ -75,29 +101,91 @@ class MazeApp(BaseApp):
 
     def _generate(self):
         """Generate a perfect maze, starting at a random left-edge cell."""
-        count = COLS * ROWS
-        self._passages = [0] * count
-        visited = bytearray(count)
-        entry_row = random.randint(0, ROWS - 1)
-        self._entry = self._index(0, entry_row)
-        visited[self._entry] = 1
-        stack = [self._entry]
+        while True:
+            count = COLS * ROWS
+            self._passages = [0] * count
+            visited = bytearray(count)
+            entry_row = random.randint(0, ROWS - 1)
+            self._entry = self._index(0, entry_row)
+            visited[self._entry] = 1
+            stack = [self._entry]
 
-        while stack:
-            current = stack[-1]
-            choices = self._neighbors(current, visited)
-            if not choices:
-                stack.pop()
+            while stack:
+                current = stack[-1]
+                choices = self._neighbors(current, visited)
+                if not choices:
+                    stack.pop()
+                    continue
+                direction, neighbor = choices[
+                    random.randint(0, len(choices) - 1)]
+                self._passages[current] |= _BITS[direction]
+                self._passages[neighbor] |= _OPPOSITE[direction]
+                visited[neighbor] = 1
+                stack.append(neighbor)
+
+            self._exit = self._farthest_right_cell()
+            self._passages[self._entry] |= WEST
+            self._passages[self._exit] |= EAST
+            self._word_hallways = self._find_word_hallways()
+            if self._word_hallways:
+                return
+
+    def _find_word_hallways(self):
+        """Assign words to distinct, sufficiently wide dead-end hallways.
+
+        A hallway starts at a horizontal dead end and includes each following
+        east/west-only cell, stopping before the first turn or junction.  Each
+        result is ``(word, left_col, right_col, row)``.
+        """
+        candidates = []
+        for cell, passages in enumerate(self._passages):
+            if passages not in (EAST, WEST):
                 continue
-            direction, neighbor = choices[random.randint(0, len(choices) - 1)]
-            self._passages[current] |= _BITS[direction]
-            self._passages[neighbor] |= _OPPOSITE[direction]
-            visited[neighbor] = 1
-            stack.append(neighbor)
 
-        self._exit = self._farthest_right_cell()
-        self._passages[self._entry] |= WEST
-        self._passages[self._exit] |= EAST
+            direction = 1 if passages == EAST else 3
+            end = cell
+            while True:
+                col, row = self._position(end)
+                next_col = col + _DX[direction]
+                if not 0 <= next_col < COLS:
+                    break
+                next_cell = self._index(next_col, row)
+                if (next_cell in (self._entry, self._exit)
+                        or self._passages[next_cell] != EAST | WEST):
+                    break
+                end = next_cell
+
+            start_col, row = self._position(cell)
+            end_col, _ = self._position(end)
+            candidates.append((min(start_col, end_col),
+                               max(start_col, end_col), row))
+
+        # Handle narrow candidates first to place as many different words as
+        # possible.  Shuffling first randomizes candidates of equal width.
+        _shuffle(candidates)
+        candidates.sort(
+            key=lambda item: (item[1] - item[0] + 1) * CELL_SIZE)
+        words = list(HALLWAY_WORDS)
+        _shuffle(words)
+        assignments = []
+        for candidate in candidates:
+            left_col, right_col, _ = candidate
+            hallway_width = ((right_col - left_col + 1) * CELL_SIZE
+                             - 2 * WALL_SIZE)
+            fitting = [index for index, word in enumerate(words)
+                       if self._word_width(word) + 2 * WORD_PADDING
+                       <= hallway_width]
+            if not fitting:
+                continue
+            word_index = fitting[random.randint(0, len(fitting) - 1)]
+            assignments.append((words.pop(word_index),) + candidate)
+            if not words:
+                break
+        return assignments if len(assignments) >= MIN_HALLWAY_WORDS else []
+
+    def _word_width(self, word):
+        font = self._word_font or WORD_FONT_FALLBACK
+        return lvgl.text_get_width(word, len(word), font, 0)
 
     def _farthest_right_cell(self):
         """Choose the most distant right-edge cell as the exit."""
@@ -142,6 +230,7 @@ class MazeApp(BaseApp):
 
     def _draw_maze(self):
         display.clear()
+        self._draw_words()
         for row in range(ROWS):
             for col in range(COLS):
                 cell = self._index(col, row)
@@ -156,6 +245,41 @@ class MazeApp(BaseApp):
                     self._black_hline(x, y + CELL_SIZE, CELL_SIZE)
                 if col == COLS - 1 and not (passages & EAST):
                     self._black_vline(x + CELL_SIZE, y, CELL_SIZE)
+
+    def _draw_words(self):
+        """Render marker-font labels onto a white framebuffer with LVGL."""
+        if self._word_screen is None:
+            screen = lvgl.obj()
+            screen.remove_style_all()
+            screen.set_size(display_width, display_height)
+            screen.set_style_bg_color(_WHITE, 0)
+            screen.set_style_bg_opa(lvgl.OPA.COVER, 0)
+            self._word_screen = screen
+        else:
+            self._word_screen.clean()
+
+        font_height = self._word_font.line_height
+        for word, left_col, right_col, row in self._word_hallways:
+            hallway_x = MAZE_X + left_col * CELL_SIZE + WALL_SIZE
+            hallway_width = ((right_col - left_col + 1) * CELL_SIZE
+                             - 2 * WALL_SIZE)
+            text_width = self._word_width(word)
+            x = hallway_x + (hallway_width - text_width) // 2
+            y = (MAZE_Y + row * CELL_SIZE
+                 + (CELL_SIZE - font_height) // 2)
+            label = lvgl.label(self._word_screen)
+            label.remove_style_all()
+            label.set_pos(x, y)
+            label.set_size(text_width + WORD_PADDING, font_height)
+            label.set_style_text_font(self._word_font, 0)
+            label.set_style_text_color(_BLACK, 0)
+            label.set_style_bg_opa(lvgl.OPA.TRANSP, 0)
+            label.set_text(word)
+
+        lvgl.screen_load(self._word_screen)
+        self._word_screen.update_layout()
+        self._word_screen.invalidate()
+        display.refresh_lvgl()
 
     def _prepare_solver(self):
         """Find the solution once so animation never paints a wrong turn."""
@@ -217,6 +341,8 @@ class MazeApp(BaseApp):
 
     def _start(self):
         print("Generating maze")
+        self._word_font = smooth_text.load_font(
+            WORD_FONT_FILE, WORD_FONT_FALLBACK)
         self._generate()
         self._draw_maze()
         self._prepare_solver()
@@ -229,6 +355,15 @@ class MazeApp(BaseApp):
 
     def run(self):
         if self.launched:
+            # AppSwitcher clears launched after this call.  Retain the request
+            # until the previous app's display waveform has fully completed;
+            # maze generation and drawing are synchronous and must not overlap
+            # timing-sensitive e-paper work.
+            self._start_pending = True
+        if self._start_pending:
+            if not display.is_done_updating():
+                return
+            self._start_pending = False
             self._start()
             return
         if self._solved:
