@@ -15,6 +15,8 @@ class KittApp(BaseApp):
         self.launched = False
         self.direction = +1
         self.lit_led = 0
+        self.red_refresh_count = 0
+        self.display_idle_since = None
     
     def show_kitt(self):
         print(f"Showing KITT")
@@ -48,7 +50,21 @@ class KittApp(BaseApp):
     def run(self):
         if self.launched:
             self.show_kitt()
-            self.lastupdate = time.time()
+            self.red_refresh_count = 0
+            self.display_idle_since = None
         else:
+            if not display.is_done_updating():
+                # Restart the delay if any display work occurs while KITT is
+                # waiting, so each refresh follows the last completion.
+                self.display_idle_since = None
+            elif self.display_idle_since is None:
+                self.display_idle_since = time.ticks_ms()
+            else:
+                delay_ms = 3000 if self.red_refresh_count == 0 else 2000
+                if time.ticks_diff(
+                        time.ticks_ms(), self.display_idle_since) >= delay_ms:
+                    display.update(red_only=True)
+                    self.red_refresh_count += 1
+                    self.display_idle_since = None
             self.update_scanner()
             pass

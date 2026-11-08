@@ -41,6 +41,7 @@ RED = const(2)
 GRAY = const(3)
 
 _gray_waveform = None
+_red_waveform = None
 
 
 @micropython.viper
@@ -141,6 +142,40 @@ def _planes_overlap(black, red, count: int) -> int:
 
 
 @micropython.viper
+def _red_delta_selectors(black, red, old_red, count: int,
+                         changed_only: int):
+    """Replace target planes with 11 hold or a red pixel's target color."""
+    b = ptr8(black)
+    r = ptr8(red)
+    old = ptr8(old_red)
+    for i in range(count):
+        new_red = r[i]
+        if changed_only:
+            changed = old[i] ^ new_red
+            hold = 255 ^ changed
+            b[i] = hold | (changed & (255 ^ new_red) & b[i])
+            r[i] = hold | (changed & new_red)
+        else:
+            removed = old[i] & (255 ^ new_red)
+            hold = 255 ^ (old[i] | new_red)
+            # Existing and added red pixels select red (10).  Removed red
+            # selects its requested underlying white/black color (00/01).
+            # Pixels that remain non-red are the only hold pixels (11).
+            b[i] = hold | (removed & b[i])
+            r[i] = hold | new_red
+
+
+@micropython.viper
+def _all_hold(black, red, count: int) -> int:
+    b = ptr8(black)
+    r = ptr8(red)
+    for i in range(count):
+        if b[i] != 255 or r[i] != 255:
+            return 0
+    return 1
+
+
+@micropython.viper
 def grayscale_kind(green_value: int) -> int:
     # These thresholds match the RGB565 grayscale flush for every 8-bit input.
     if green_value < 96:
@@ -179,6 +214,20 @@ def gray_waveform(display):
     return _gray_waveform
 
 
+def red_waveform(display):
+    """B1 three-color waveform; selector 11 is its all-ground hold table."""
+    global _red_waveform
+    if not display.supports_grayscale:
+        raise ValueError("Red-only refresh requires a B1 panel")
+    if _red_waveform is None:
+        from data import rendered_luts
+        table = rendered_luts.lutb_base
+        if len(table) != 400:
+            raise ValueError("Red-only refresh requires a 400-byte B1 waveform")
+        _red_waveform = bytes(table)
+    return _red_waveform
+
+
 def _validate_halves(black_left, red_left, black_right, red_right):
     for part in (black_left, red_left, black_right, red_right):
         if len(part) != HALF_BYTES:
@@ -200,12 +249,15 @@ async def pull(display):
     from lib.epd import EPD_BUSY1_PIN, EPD_BUSY2_PIN
     await wait_ready()
     display._send_index_data(0x15, [0x3C])
-    # Observe both assertions before yielding; another app's synchronous
-    # rendering can otherwise hide the entire BUSY pulse from this task.
+    # Observe an assertion before yielding; another app's synchronous rendering
+    # can otherwise hide the entire BUSY pulse from this task. A COG with only
+    # hold/sparse selectors does not reliably assert BUSY, so do not require
+    # both assertion edges. wait_ready() below still requires both COGs to be
+    # ready before RAM or power changes.
     start = time.ticks_ms()
     busy_left = False
     busy_right = False
-    while not (busy_left and busy_right):
+    while not (busy_left or busy_right):
         busy_left = busy_left or not EPD_BUSY1_PIN.value()
         busy_right = busy_right or not EPD_BUSY2_PIN.value()
         if time.ticks_diff(time.ticks_ms(), start) >= 100:
@@ -307,6 +359,34 @@ async def mixed_update(display, black_left, red_left, black_right, red_right):
         raise
     if has_gray:
         await _finish(display)
+
+
+async def red_only_update(display, black_left, red_left, black_right, red_right,
+                          old_red_left, old_red_right, changed_only=False):
+    """Refresh red, apply red additions/removals, and hold non-red pixels."""
+    _validate_halves(black_left, red_left, black_right, red_right)
+    _validate_halves(old_red_left, old_red_left, old_red_right, old_red_right)
+    _red_delta_selectors(
+        black_left, red_left, old_red_left, HALF_BYTES, int(changed_only))
+    _red_delta_selectors(
+        black_right, red_right, old_red_right, HALF_BYTES, int(changed_only))
+
+    # Both planes being all ones means every pixel was optimized into hold.
+    if (_all_hold(black_left, red_left, HALF_BYTES)
+            and _all_hold(black_right, red_right, HALF_BYTES)):
+        print("EPD: red-only refresh has no changes")
+        return
+
+    display._panel_monochrome = False
+    try:
+        await _start(
+            display, black_left, red_left, black_right, red_right,
+            red_waveform(display))
+        await pull(display)
+    except BaseException:
+        await _cleanup_error(display)
+        raise
+    await _finish(display)
 
 
 async def _mixed_passes(display, black_left, red_left, black_right, red_right, gray, waveform):

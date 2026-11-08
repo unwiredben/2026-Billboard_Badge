@@ -66,6 +66,7 @@ half_frame_one_color_size = const(display_height * display_width // (8 * 2))
 # Counting bytes, not pixels, since each byte is 8 packed pixels
 display_width_bytes = const(display_width // 8)
 display_half_width_bytes = const(display_width_bytes // 2)
+lv_draw_rows = const(64)
 
 
 # Two displays use different bit orders
@@ -180,10 +181,16 @@ class EPaperDisplay:
         self._supports_grayscale = self._reverse_fb_bits
         self._requested_grayscale = False
         self._requested_mixed = False
+        self._requested_red_only = False
+        self._requested_changed_only = False
         self._render_grayscale = False
         self._render_mixed = False
         # E-paper keeps its image across reboot; its initial pigments are unknown.
         self._panel_monochrome = False
+        # Allocate red refresh history only after LVGL has created its native
+        # display object; that object needs the more constrained heap region.
+        self._displayed_red = None
+        self._displayed_red_valid = False
         self._png_blink = False
         self._refreshing_hw = False
 
@@ -209,13 +216,13 @@ class EPaperDisplay:
         self._display_updated.set()
         gc.collect()
 
-        # Set up lvgl (deinit first if soft-rebooted so C pointers don't corrupt)
-        if hasattr(lvgl, "is_initialized") and lvgl.is_initialized():
-            if hasattr(lvgl, "deinit"):
-                lvgl.deinit()
+        # main.py forces a hardware reset if LVGL survived a soft reboot. This
+        # build cannot safely create a second display after deinit/init.
         lvgl.init()
-        # Give LVGL a buffer 2-bytes-per-pixel for RGB565 format
-        self._lv_draw_buf = bytearray(display_width * display_height * 2)
+        # PARTIAL rendering only needs a strip, not a 1.29 MB full-screen RGB565
+        # buffer.  Keeping this small leaves room for LVGL's native display
+        # object, the two e-paper planes, and red-refresh history.
+        self._lv_draw_buf = bytearray(display_width * lv_draw_rows * 2)
 
         self.lv_display = lvgl.display_create(display_width, display_height)
         self.lv_display.set_color_format(lvgl.COLOR_FORMAT.RGB565)
@@ -228,6 +235,12 @@ class EPaperDisplay:
         self.lv_display.set_flush_cb(self._lv_flush)
         self.lv_screen = lvgl.screen_active()
         self.lv_screen.set_size(display_width, display_height)
+
+        # A red-only update needs the red state from the last successful ordinary
+        # refresh. Keep it in logical framebuffer order; worker snapshots are
+        # still used so applications may draw while the panel is busy.
+        if self.supports_grayscale:
+            self._displayed_red = bytearray(half_frame_one_color_size * 2)
 
     def _lv_flush(self, disp, area, color_p):
         print("Calling EPaperDisplay._lv_flush (Viper)")
@@ -264,11 +277,15 @@ class EPaperDisplay:
     def supports_grayscale(self):
         return self._supports_grayscale
 
-    def _check_modes(self, grayscale, mixed):
-        if grayscale and mixed:
-            raise ValueError("Choose grayscale or mixed mode")
+    def _check_modes(self, grayscale, mixed, red_only=False, changed_only=False):
+        if int(bool(grayscale)) + int(bool(mixed)) + int(bool(red_only)) > 1:
+            raise ValueError("Choose grayscale, mixed, or red-only mode")
+        if changed_only and not red_only:
+            raise ValueError("changed_only requires red_only=True")
         if (grayscale or mixed) and not self.supports_grayscale:
             raise ValueError("Grayscale refresh requires a B1 panel")
+        if red_only and not self.supports_grayscale:
+            raise ValueError("Red-only refresh requires a B1 panel")
 
     def refresh_lvgl(self, grayscale=False, mixed=False):
         """Render LVGL into the framebuffers; use the same mode in update().
@@ -287,16 +304,22 @@ class EPaperDisplay:
             self._render_grayscale = previous_grayscale
             self._render_mixed = previous_mixed
 
-    def update(self, grayscale=False, mixed=False):
+    def update(self, grayscale=False, mixed=False, red_only=False,
+               changed_only=False):
         """Queue the latest frame; gray waveforms are opt-in and require B1.
 
         grayscale=True uses 00 white, 01 black, 10 gray (no red).
         mixed=True uses 00 white, 01 black, 10 red, 11 gray in software.
+        red_only=True refreshes red pixels and holds pixels that remain non-red.
+        changed_only=True additionally holds unchanged red pixels.
+        Its first call after boot or a gray refresh falls back to a full update.
         Match the mode used by refresh_lvgl()/draw_png().
         """
-        self._check_modes(grayscale, mixed)
+        self._check_modes(grayscale, mixed, red_only, changed_only)
         self._requested_grayscale = grayscale
         self._requested_mixed = mixed
+        self._requested_red_only = red_only
+        self._requested_changed_only = changed_only
         self._display_updated.clear()
         self._framebuffer_ready.set()
 
@@ -345,12 +368,16 @@ class EPaperDisplay:
         black_right = bytearray(half_frame_one_color_size)
         red_left = bytearray(half_frame_one_color_size)
         red_right = bytearray(half_frame_one_color_size)
+        old_red_left = None
+        old_red_right = None
         while True:
             if self._framebuffer_ready.is_set():
                 # Clear before awaiting hardware so a later request is retained.
                 self._framebuffer_ready.clear()
                 grayscale = self._requested_grayscale
                 mixed = self._requested_mixed
+                red_only = self._requested_red_only
+                changed_only = self._requested_changed_only
                 self._display_updated.clear()
                 t0 = time.ticks_ms()
                 if self._reverse_fb_bits and not (grayscale or mixed):
@@ -367,6 +394,24 @@ class EPaperDisplay:
                     _fast_split_no_reverse(
                         self._framebuffer_red, red_left, red_right
                     )
+                use_red_delta = red_only and self._displayed_red_valid
+                if use_red_delta:
+                    if old_red_left is None:
+                        old_red_left = bytearray(half_frame_one_color_size)
+                        old_red_right = bytearray(half_frame_one_color_size)
+                    if self._reverse_fb_bits:
+                        _fast_split_and_reverse(
+                            self._displayed_red, old_red_left, old_red_right, _REVERSE_LUT
+                        )
+                    else:
+                        _fast_split_no_reverse(
+                            self._displayed_red, old_red_left, old_red_right
+                        )
+
+                # Save the exact target represented by the worker snapshots.
+                # If hardware fails below it is invalidated rather than trusted.
+                if self._displayed_red is not None and not (grayscale or mixed):
+                    self._displayed_red[:] = self._framebuffer_red
                 print("Viper split & reverse ms:", time.ticks_diff(time.ticks_ms(), t0))
 
                 leds.clear()
@@ -381,12 +426,29 @@ class EPaperDisplay:
                     if mixed:
                         from lib.epd_grayscale import mixed_update
                         await mixed_update(self, black_left, red_left, black_right, red_right)
+                    elif use_red_delta:
+                        from lib.epd_grayscale import red_only_update
+                        await red_only_update(
+                            self, black_left, red_left, black_right, red_right,
+                            old_red_left, old_red_right, changed_only)
                     else:
+                        if red_only:
+                            print("EPD: red-only baseline unknown; using full refresh")
                         await self.global_update(
                             black_left, red_left, black_right, red_right, grayscale=grayscale)
                 except BaseException:
                     self._panel_monochrome = False
+                    self._displayed_red_valid = False
                     raise
+                else:
+                    self._displayed_red_valid = (
+                        self._displayed_red is not None
+                        and not (grayscale or mixed)
+                    )
+                    if self._displayed_red_valid:
+                        self._panel_monochrome = not (
+                            any(self._displayed_red)
+                        )
                 finally:
                     self._reverse_fb_bits = old_rev
                     self._refreshing_hw = False

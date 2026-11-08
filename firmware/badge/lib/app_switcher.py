@@ -30,6 +30,7 @@ class AppSwitcher:
         app_mods = []
         for filename, _, _, _ in os.ilistdir("/apps"):  # pyright: ignore[reportAssignmentType]
             if not filename.endswith(".py") or filename.startswith("_"):
+                print(f"Skipping file: {filename}")
                 continue
             app_modname = filename.split(".")[0]
             app_mods.append(app_modname)

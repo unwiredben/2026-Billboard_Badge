@@ -78,7 +78,6 @@ Unknown or previously colored panel content receives a full white cleanup first.
 Custom waveform waits are bounded and check both display controllers. Updates
 queued during a refresh coalesce into the latest requested image and mode.
 
-
 ## Optional smooth text
 
 Set `"smooth_text": true` in `/data/panel_config.json` to enable gray
@@ -93,3 +92,35 @@ For scenes containing red, select mixed mode.
 
 See `badge/data/fonts/README.txt` for the font license, pinned build tools, and
 reproduction commands. The generator verifies the expected output hashes.
+
+## B1 red-only refresh
+
+After an ordinary successful refresh, an application may repaint the current
+red plane and apply red additions/removals while holding pixels that remain
+non-red:
+
+```python
+display.red.pixel(x, y, 1)
+display.update(red_only=True)
+```
+
+Removing red restores the color selected by the current black plane (black when
+its bit is 1, white when it is 0). Existing red pixels are actively refreshed,
+even when the red framebuffer has not changed. Changes to black pixels that
+were not red are intentionally ignored by a red-only refresh. The first
+red-only request after boot, after an error, or after a grayscale/mixed refresh
+performs a normal full refresh to establish a known baseline. If neither the
+previous nor current image contains red, the panel hardware is not started.
+
+Red-only refresh is supported on the B1 panel only and cannot be combined with
+`grayscale=True` or `mixed=True`.
+
+To optimize the refresh to red additions and removals only, also request
+`changed_only=True`. Unchanged red pixels are then held, and a request with no
+red transitions does not start the panel hardware:
+
+```python
+display.update(red_only=True, changed_only=True)
+```
+
+`changed_only=True` without `red_only=True` raises `ValueError`.

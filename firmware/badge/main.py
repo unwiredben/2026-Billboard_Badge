@@ -4,7 +4,7 @@ import time
 import asyncio as aio
 import lvgl
 
-# A display left over from before a soft reset points into the wiped heap
+# A display left over from before a soft reset points into the wiped heap.
 if lvgl.display_get_default() is not None:
     machine.reset()
 
