@@ -1,6 +1,7 @@
 """Generate and visibly solve a black-on-white maze."""
 
 import random
+import time
 
 from apps.base_app import BaseApp
 from lib.epd import display, display_height, display_width
@@ -12,6 +13,7 @@ WALL_SIZE = 3
 RED_INSET = WALL_SIZE * 2
 FINAL_RED_REFRESHES = 2
 RED_TRAIL_LENGTH = 4
+RESTART_DELAY_MS = 5000
 
 COLS = (display_width - 2 * PADDING) // CELL_SIZE
 ROWS = (display_height - 2 * PADDING) // CELL_SIZE
@@ -45,6 +47,7 @@ class MazeApp(BaseApp):
         self._waiting_for_initial = False
         self._final_refreshes = 0
         self._solved = False
+        self._restart_at = None
 
     @staticmethod
     def _index(col, row):
@@ -220,6 +223,7 @@ class MazeApp(BaseApp):
         self._waiting_for_initial = True
         self._final_refreshes = 0
         self._solved = False
+        self._restart_at = None
         display.update(led_feedback=False)
 
     def run(self):
@@ -227,6 +231,14 @@ class MazeApp(BaseApp):
             self._start()
             return
         if self._solved:
+            if not display.is_done_updating():
+                return
+            if self._restart_at is None:
+                self._restart_at = time.ticks_add(
+                    time.ticks_ms(), RESTART_DELAY_MS)
+                return
+            if time.ticks_diff(time.ticks_ms(), self._restart_at) >= 0:
+                self._start()
             return
         if not display.is_done_updating():
             return
